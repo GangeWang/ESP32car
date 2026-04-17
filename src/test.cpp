@@ -5,6 +5,12 @@ const int PIN_AO_L = 34;
 const int PIN_AO_C = 35;
 const int PIN_AO_R = 32;
 
+// ===================== 超聲波（HC-SR04） =====================
+const int PIN_US_TRIG = 23;           // 你可改腳位
+const int PIN_US_ECHO = 22;           // 你可改腳位
+const int STOP_DIST_CM = 10;          // <= 15cm 停車
+const unsigned long US_TIMEOUT = 30000UL; // 30ms timeout
+
 // ===================== 前輪驅動 =====================
 const int PIN_F_IN2 = 33;   // 右前
 const int PIN_F_IN3 = 25;   // 左前
@@ -16,23 +22,27 @@ const int PIN_B_IN3 = 17;   // 右後
 const int PIN_B_EN  = 12;   // 後輪 PWM
 
 // ===================== PWM =====================
-const int PWM_FREQ = 1000;
+const int PWM_FREQ = 5000;
 const int PWM_RES  = 8;     // 0~255
 const int CH_F_EN  = 0;
 const int CH_B_EN  = 1;
 
 // ===================== 速度參數 =====================
-int baseSpeed   = 145;
-int turnSpeed   = 175;
-int searchSpeed = 115;
+int baseSpeed   = 235;
+int turnSpeed   = 245;
+int searchSpeed = 210;
 
 // 你目前車子實測：LOW=ON
 const bool MOTOR_ACTIVE_HIGH = false;
 
-// 黑線判斷：你實測黑線 AO > 1000、白底 < 400
-int thL = 700;
-int thC = 700;
-int thR = 700;
+// 黑線判斷
+int thL = 300;
+int thC = 300;
+int thR = 300;
+
+// ===================== 🔥 計時功能 =====================
+unsigned long startTime = 0;
+const unsigned long LIMIT_TIME = 18000; // 18秒
 
 enum LastTurn { LT_NONE, LT_LEFT, LT_RIGHT };
 LastTurn lastTurn = LT_NONE;
@@ -43,13 +53,13 @@ void writeMotorPin(int pin, bool on) {
 }
 
 void setFrontWheels(bool rightOn, bool leftOn) {
-  writeMotorPin(PIN_F_IN2, rightOn); // 右前
-  writeMotorPin(PIN_F_IN3, leftOn);  // 左前
+  writeMotorPin(PIN_F_IN2, rightOn);
+  writeMotorPin(PIN_F_IN3, leftOn);
 }
 
 void setBackWheels(bool leftOn, bool rightOn) {
-  writeMotorPin(PIN_B_IN2, leftOn);  // 左後
-  writeMotorPin(PIN_B_IN3, rightOn); // 右後
+  writeMotorPin(PIN_B_IN2, leftOn);
+  writeMotorPin(PIN_B_IN3, rightOn);
 }
 
 void setSpeed(int f, int b) {
@@ -57,17 +67,31 @@ void setSpeed(int f, int b) {
   ledcWrite(CH_B_EN, constrain(b, 0, 255));
 }
 
-int readAvg(int pin, int samples = 10) {
+int readAvg(int pin, int samples = 4) {
+  analogRead(pin); // dummy read（降低ESP32 ADC首筆飄動）
   long s = 0;
   for (int i = 0; i < samples; i++) {
     s += analogRead(pin);
-    delayMicroseconds(200);
+    delayMicroseconds(60);
   }
   return (int)(s / samples);
 }
 
 bool isBlack(int value, int threshold) {
   return (value > threshold);
+}
+
+float readDistanceCM() {
+  digitalWrite(PIN_US_TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(PIN_US_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(PIN_US_TRIG, LOW);
+
+  unsigned long duration = pulseIn(PIN_US_ECHO, HIGH, US_TIMEOUT);
+  if (duration == 0) return 999.0f; // timeout 視為很遠
+
+  return (duration * 0.0343f) / 2.0f;
 }
 
 // ===================== 動作 =====================
@@ -78,23 +102,20 @@ void stopCar() {
 }
 
 void goStraight() {
-  // 四輪都動
   setFrontWheels(false, false);
   setBackWheels(false, false);
   setSpeed(baseSpeed, baseSpeed);
 }
 
 void turnLeftHard() {
-  // 停左側，右側前進
-  setFrontWheels(false, true);  // 右前ON 左前OFF
-  setBackWheels(true, false);   // 左後OFF 右後ON
+  setFrontWheels(false, true);
+  setBackWheels(true, false);
   setSpeed(turnSpeed, turnSpeed);
 }
 
 void turnRightHard() {
-  // 停右側，左側前進
-  setFrontWheels(true, false);  // 右前OFF 左前ON
-  setBackWheels(false, true);   // 左後ON 右後OFF
+  setFrontWheels(true, false);
+  setBackWheels(false, true);
   setSpeed(turnSpeed, turnSpeed);
 }
 
@@ -104,17 +125,27 @@ void searchLine() {
   setSpeed(searchSpeed, searchSpeed);
 }
 
+void all_stop() {
+  setFrontWheels(true, true);
+  setBackWheels(true, true);
+  setSpeed(0, 0);
+}
+
 // ===================== Setup / Loop =====================
 void setup() {
   Serial.begin(115200);
 
-  analogReadResolution(12);        // 0~4095
-  analogSetAttenuation(ADC_11db);  // 適合3.3V
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
 
   pinMode(PIN_F_IN2, OUTPUT);
   pinMode(PIN_F_IN3, OUTPUT);
   pinMode(PIN_B_IN2, OUTPUT);
   pinMode(PIN_B_IN3, OUTPUT);
+
+  pinMode(PIN_US_TRIG, OUTPUT);
+  pinMode(PIN_US_ECHO, INPUT);
+  digitalWrite(PIN_US_TRIG, LOW);
 
   ledcSetup(CH_F_EN, PWM_FREQ, PWM_RES);
   ledcAttachPin(PIN_F_EN, CH_F_EN);
@@ -123,9 +154,22 @@ void setup() {
 
   stopCar();
   delay(300);
+
+  // 🔥 開始計時
+  startTime = millis();
 }
 
 void loop() {
+  // ===== 超音波防撞優先 =====
+  float d = readDistanceCM();
+  if (d <= STOP_DIST_CM) {
+    all_stop();
+    Serial.print("ULTRASONIC STOP, d=");
+    Serial.println(d);
+    delay(30);
+    return;
+  }
+
   int vL = readAvg(PIN_AO_L);
   int vC = readAvg(PIN_AO_C);
   int vR = readAvg(PIN_AO_R);
@@ -141,11 +185,13 @@ void loop() {
   Serial.print(" -> B ");
   Serial.print(L); Serial.print(" ");
   Serial.print(C); Serial.print(" ");
-  Serial.println(R);
+  Serial.print(R);
+  Serial.print(" | US ");
+  Serial.println(d);
 
-  // ===== 中間優先：只要中間在黑線上就直行 =====
+  // ===== 中間優先 =====
   if (C) {
-    goStraight();   // 四輪全動
+    goStraight();
   }
   else if (L && !R) {
     turnLeftHard();
@@ -156,13 +202,16 @@ void loop() {
     lastTurn = LT_RIGHT;
   }
   else if (L && R) {
-    // 中間沒看到但兩側看到，多半是交界，先直行
     goStraight();
   }
   else {
-    // 全部沒看到
-    searchLine();
+    // ===== 🔥 18秒後停止功能 =====
+    if (millis() - startTime >= LIMIT_TIME) {
+      all_stop();
+    } else {
+      searchLine();
+    }
   }
 
-  delay(8);
+  delay(2);
 }
