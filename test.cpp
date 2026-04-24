@@ -8,7 +8,7 @@ const int PIN_AO_R = 32;
 // ===================== 超聲波（HC-SR04） =====================
 const int PIN_US_TRIG = 23;           // 你可改腳位
 const int PIN_US_ECHO = 22;           // 你可改腳位
-const int STOP_DIST_CM = 10;          // <= 15cm 停車
+const int STOP_DIST_CM = 30;          // <= 15cm 停車
 const unsigned long US_TIMEOUT = 30000UL; // 30ms timeout
 
 // ===================== 前輪驅動 =====================
@@ -206,11 +206,11 @@ void loop() {
   }
   else {
     // ===== 🔥 18秒後停止功能 =====
-    if (millis() - startTime >= LIMIT_TIME) {
-      all_stop();
-    } else {
+    //if (millis() - startTime >= LIMIT_TIME) {
+      //all_stop();
+    //} else {
       searchLine();
-    }
+   // }
   }
 
   delay(2);
